@@ -50,9 +50,6 @@ def download_series(series_url):
     series_dir = os.path.join(OUTPUT_DIR, manga_sanitized)
     os.makedirs(series_dir, exist_ok=True)
 
-    # Reverse order (oldest first)
-    chapters = list(reversed(chapters))
-
     failed = []
     total = len(chapters)
     pad_length = len(str(total))

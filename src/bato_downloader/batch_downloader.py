@@ -2,6 +2,9 @@ import os
 import time
 import json
 import threading
+import queue
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from bato_scraper import get_manga_info, download_chapter, sanitize_filename
 
 # --- CONFIG ---
@@ -11,6 +14,10 @@ MAX_WORKERS = 10                 # threads for images per chapter
 RETRY_DELAY = 10                 # seconds before retry
 FAILED_LOG = "failed_chapters.json"
 # ---------------
+
+# Queue for finished chapters (to be converted)
+chapter_queue = queue.Queue()
+stop_event = threading.Event()
 
 def load_failed_chapters():
     if os.path.exists(FAILED_LOG):
@@ -70,10 +77,16 @@ def download_series(series_url):
                 output_dir=OUTPUT_DIR,
                 stop_event=threading.Event(),
                 convert_to_pdf=False,
-                convert_to_cbz=True,
-                keep_images=False,
+                convert_to_cbz=False,
+                keep_images=True,
                 max_workers=MAX_WORKERS,
             )
+            chapter_dir = os.path.join(OUTPUT_DIR, sanitize_filename(manga_title), sanitize_filename(numbered_title))
+            chapter_queue.put({
+            "chapter_dir": chapter_dir,
+            "manga_title": manga_title,
+            "chapter_title": numbered_title
+            })
         except Exception as e:
             print(f"Failed to download {numbered_title}: {e}")
             # store failure info for retry
@@ -96,18 +109,29 @@ def retry_failed():
     print(f"\nRetrying {len(failed)} failed chapters...")
     new_failed = []
     for chap in failed:
-        try:
-            download_chapter(
-                chapter_url=chap["chapter_url"],
-                manga_title=chap["manga_title"],
-                chapter_title=chap["chapter_title"],
-                output_dir=OUTPUT_DIR,
-                stop_event=threading.Event(),
-                convert_to_pdf=False,
-                convert_to_cbz=True,
-                keep_images=False,
-                max_workers=MAX_WORKERS,
-            )
+    try:
+        download_chapter(
+            chapter_url=chap["chapter_url"],
+            manga_title=chap["manga_title"],
+            chapter_title=chap["chapter_title"],
+            output_dir=OUTPUT_DIR,
+            stop_event=threading.Event(),
+            convert_to_pdf=False,
+            convert_to_cbz=False,  # queue will convert
+            keep_images=True,
+            max_workers=MAX_WORKERS,
+        )
+        chapter_dir = os.path.join(
+            OUTPUT_DIR,
+            sanitize_filename(chap["manga_title"]),
+            sanitize_filename(chap["chapter_title"])
+        )
+        chapter_queue.put({
+            "chapter_dir": chapter_dir,
+            "manga_title": chap["manga_title"],
+            "chapter_title": chap["chapter_title"],
+        })
+        
         except Exception as e:
             print(f"Retry failed for {chap['chapter_title']}: {e}")
             new_failed.append(chap)
@@ -121,11 +145,45 @@ def retry_failed():
         print("\n All previously failed chapters retried successfully!")
         if os.path.exists(FAILED_LOG):
             os.remove(FAILED_LOG)
+            
+def converter_worker():
+    """
+    Continuously watches the chapter_queue and converts chapters to CBZ
+    as soon as they're fully downloaded.
+    """
+    from bato_scraper import convert_chapter_to_cbz  # reuse your existing function
+    
+    while not stop_event.is_set() or not chapter_queue.empty():
+        try:
+            item = chapter_queue.get(timeout=2)
+        except queue.Empty:
+            continue
+
+        chapter_dir = item["chapter_dir"]
+        manga_title = item["manga_title"]
+        chapter_title = item["chapter_title"]
+
+        try:
+            print(f"Converting to CBZ: {chapter_title}")
+            convert_chapter_to_cbz(
+                chapter_dir, 
+                manga_title, 
+                chapter_title, 
+                delete_images=True
+            )
+            print(f"Converted: {chapter_title}")
+        except Exception as e:
+            print(f"Conversion failed for {chapter_title}: {e}")
+        finally:
+            chapter_queue.task_done()
 
 # ---------------------------------------
 if __name__ == "__main__":
     series_urls = read_series_urls()
     all_failed = []
+    # Start converter background thread
+    converter_thread = threading.Thread(target=converter_worker, daemon=True)
+    converter_thread.start()
 
     for url in series_urls:
         failed = download_series(url)
@@ -138,4 +196,12 @@ if __name__ == "__main__":
 
     # Retry any failed chapters after all series processed
     retry_failed()
-    print("\n All downloads complete!")
+    
+    # Wait for all queued conversions to complete
+    chapter_queue.join()
+    
+    # Signal converter thread to exit when queue is empty
+    stop_event.set()
+    converter_thread.join()
+    
+    print("\n All downloads and CBZ conversions complete!")

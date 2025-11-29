@@ -64,7 +64,7 @@ def download_series(series_url):
     total = len(chapters)
     pad_length = len(str(total))
 
-    for index, chapter in enumerate(chapters):
+    for index, chapter in enumerate(chapters,start=1):
         prefix = str(index).zfill(pad_length)
         clean_title = sanitize_filename(chapter["title"])
         numbered_title = f"{prefix}_{clean_title}"
